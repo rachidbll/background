@@ -11,6 +11,6 @@
   "license": "ISC",
   "dependencies": {
     "express": "^4.17.1",
-    "bodypix-js": "^3.0.4"
+    "bodypix-js": "^2.0.1"
   }
 }
