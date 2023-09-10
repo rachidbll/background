@@ -1,67 +1,69 @@
 const express = require('express');
 const app = express();
-const port = process.env.PORT || 3000;
-const { createCanvas, Image } = require('canvas');
-const bodyPix = require('@tensorflow-models/body-pix');
-const tf = require('@tensorflow/tfjs-node');
-const multer = require('multer');
+const path = require('path');
+const bodyParser = require('body-parser');
+const fileUpload = require('express-fileupload');
 const fs = require('fs');
+const { createCanvas, loadImage } = require('canvas');
+const bodyPix = require('@tensorflow-models/body-pix');
 
-app.use(express.static('public'));
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(fileUpload());
 
-// Set up Multer for handling file uploads
-const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
-
-// Load the BodyPix model
-let net;
-bodyPix.load().then((model) => {
-  net = model;
-});
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/index.html');
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.post('/remove', upload.single('image'), async (req, res) => {
-  if (!net) {
-    res.status(500).send('BodyPix model not loaded');
-    return;
+app.post('/upload', async (req, res) => {
+  if (!req.files || Object.keys(req.files).length === 0) {
+    return res.status(400).send('No files were uploaded.');
   }
 
-  const imageBuffer = req.file.buffer;
-  const img = new Image();
-  img.src = imageBuffer;
+  const uploadedFile = req.files.uploadedFile;
+  const outputPath = path.join(__dirname, 'public', 'output.png');
 
-  const canvas = createCanvas(img.width, img.height);
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0);
-
-  const input = tf.browser.fromPixels(canvas);
-  const segmentation = await net.segmentPerson(input);
-
-  const output = createCanvas(img.width, img.height);
-  const outputCtx = output.getContext('2d');
-  outputCtx.drawImage(img, 0, 0);
-
-  const mask = segmentation.toMask(2); // 2 corresponds to 'person' class
-  const imageData = outputCtx.getImageData(0, 0, img.width, img.height);
-
-  for (let i = 0; i < imageData.data.length; i += 4) {
-    if (mask.data[i / 4] === 0) {
-      imageData.data[i + 3] = 0; // Set the alpha channel to 0 (transparent)
+  uploadedFile.mv(path.join(__dirname, 'public', uploadedFile.name), async (err) => {
+    if (err) {
+      return res.status(500).send(err);
     }
-  }
 
-  outputCtx.putImageData(imageData, 0, 0);
+    try {
+      const image = await loadImage(uploadedFile.name);
+      const canvas = createCanvas(image.width, image.height);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(image, 0, 0, image.width, image.height);
 
-  const outputBuffer = output.toBuffer('image/png');
+      const net = await bodyPix.load();
+      const segmentation = await net.segmentPerson(canvas);
 
-  fs.writeFileSync('public/output.png', outputBuffer);
+      const newCanvas = createCanvas(image.width, image.height);
+      const newCtx = newCanvas.getContext('2d');
+      newCtx.drawImage(image, 0, 0, image.width, image.height);
 
-  res.sendFile(__dirname + '/public/output.png');
+      segmentation.data.forEach((segment, index) => {
+        if (segment === 0) {
+          newCtx.fillStyle = 'rgba(0, 0, 0, 0)';
+          newCtx.fillRect(index % image.width, Math.floor(index / image.width), 1, 1);
+        }
+      });
+
+      const stream = fs.createWriteStream(outputPath);
+      stream.on('close', () => {
+        console.log('Background removed and saved to', outputPath);
+        res.sendFile(path.join(__dirname, 'public', 'output.png'));
+      });
+
+      newCanvas.createPNGStream().pipe(stream);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send('Error processing image.');
+    }
+  });
 });
 
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });
